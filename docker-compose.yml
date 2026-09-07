@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  steam-updater:
+    build: .
+    image: steam-updater:latest
+    container_name: steam-updater
+    restart: "no"
+
+    env_file:
+      - .env
+
+    volumes:
+      - ${STEAMCMD_DATA_PATH}:/root/.local/share/Steam
+      - ${LIBRARY_PATH}:/library
+      - ${COMPOSE_PATH}/update_library.sh:/scripts/update_library.sh:ro
+
+    entrypoint: ["/bin/bash", "/scripts/update_library.sh"]
+
