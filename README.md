@@ -31,9 +31,15 @@ script again.
 
 This assumes you're running it on Linux. I'm not sure if it will work in Windows without WSL.
 
-### 1 - Fill in `.env`
+### 1 - Create `.env`
 
-Edit the values of `.env`. The comments explain what each value is.
+Run the following:
+
+```
+cp .env.example .env
+```
+
+Edit the values in `.env`. The comments explain what each value is.
 
 ### 2 - First time build and login
 
