@@ -18,9 +18,11 @@ This is a Docker Compose stack that:
 2. Downloads them to a local folder.
 3. It's also capable of updating existing files.
 
-It's pretty bare-bones, but works mostly fine. It has occasional problems with downloads and
-absolutely no retry mechanisms, but that kind of stuff should be solved by just running the
-script again.
+It's pretty bare-bones, but works mostly fine:
+* It has occasional problems with downloads and absolutely no retry mechanisms, but that kind of
+  stuff should be solved by just running the script again.
+* It has no batching, parallelism, resume option or any smart download features. I kept it simple
+  on purpose.
 
 ## Setup
 
@@ -43,7 +45,7 @@ Edit the values in `.env`. The comments explain what each value is.
 
 ### 2 - First time build and login
 
-Let's get your account credentials set up
+Let's get your account credentials set up:
 
 ```
 # Build the Docker image
@@ -74,6 +76,8 @@ docker compose up -d
 # If this command is not recognized, you might need to run:
 # docker-compose up -d
 ```
+
+For other UIs, like Portainer or your NAS' container manager, you're on your own.
 
 ### 4 - Running it on a schedule
 
