@@ -12,10 +12,22 @@ SKIP_APPIDS="${SKIP_APPIDS:-}"
 RETRY_ATTEMPTS="${STEAM_RETRY_ATTEMPTS:-3}"
 RETRY_DELAY="${STEAM_RETRY_DELAY:-30}"
 
+LOGS_PATH=/scripts/logs
+MAIN_LOG_PATH="${LOGS_PATH}/main.log"
+
+mkdir -p "${LOGS_PATH}"
+rm -f "${LOGS_PATH}"/*.log
+
 mkdir -p "${LIBRARY_BASE}"
 
+# ── Logging helpers ───────────────────────────────────────────────────────────
+# Redirect this process's stdout+stderr to a log file.
+# Call inside a subshell to scope the redirect.
+log_to() {
+  exec >> "$1" 2>&1
+}
+
 # ── Check if an app is already installed ──────────────────────────────────────
-# steamcmd writes appmanifest_<id>.acf on successful install
 check_installed() {
   local APPID="$1"
   find "${LIBRARY_BASE}/${APPID}" -name "appmanifest_${APPID}.acf" 2>/dev/null | grep -q .
@@ -25,109 +37,123 @@ check_installed() {
 download_app() {
   local APPID="$1"
   local NAME="$2"
-  local ATTEMPT=0
+  local APP_LOG_PATH="${LOGS_PATH}/${APPID}.log"
   local INSTALL_DIR="${LIBRARY_BASE}/${APPID}"
 
   mkdir -p "$INSTALL_DIR"
 
-  while [[ $ATTEMPT -lt $RETRY_ATTEMPTS ]]; do
-    ATTEMPT=$((ATTEMPT + 1))
-    echo "    [Attempt $ATTEMPT/$RETRY_ATTEMPTS] $NAME ($APPID)..."
+  # Subshell scopes the exec redirect — does NOT bleed back to the caller
+  (
+    log_to "$APP_LOG_PATH"
 
-    steamcmd \
-      +@sSteamCmdForcePlatformType windows \
-      +@ShutdownOnFailedCommand 0 \
-      +set_download_throttle "${STEAM_DOWNLOAD_THROTTLE:-0}" \
-      +login "${STEAM_USER}" \
-      +force_install_dir "$INSTALL_DIR" \
-      +app_update "$APPID" \
-      +quit
+    local ATTEMPT=0
+    while [[ $ATTEMPT -lt $RETRY_ATTEMPTS ]]; do
+      ATTEMPT=$((ATTEMPT + 1))
+      echo "    [Attempt $ATTEMPT/$RETRY_ATTEMPTS] $NAME ($APPID)..."
 
-    if check_installed "$APPID"; then
-      echo "    ✓ Installed: $NAME ($APPID)"
-      return 0
-    fi
+      steamcmd \
+        +@sSteamCmdForcePlatformType windows \
+        +@ShutdownOnFailedCommand 0 \
+        +set_download_throttle "${STEAM_DOWNLOAD_THROTTLE:-0}" \
+        +login "${STEAM_USER}" \
+        +force_install_dir "$INSTALL_DIR" \
+        +app_update "$APPID" \
+        +quit
 
-    echo "    ✗ Not verified after attempt $ATTEMPT."
-    if [[ $ATTEMPT -lt $RETRY_ATTEMPTS ]]; then
-      echo "    Waiting ${RETRY_DELAY}s before retry..."
-      sleep "$RETRY_DELAY"
-    fi
-  done
+      if check_installed "$APPID"; then
+        echo "    ✓ Installed: $NAME ($APPID)"
+        exit 0  # exit the subshell, not the script
+      fi
 
-  echo "    ✗ Gave up on $NAME ($APPID) after $RETRY_ATTEMPTS attempts."
-  return 1
+      echo "    ✗ Not verified after attempt $ATTEMPT."
+      if [[ $ATTEMPT -lt $RETRY_ATTEMPTS ]]; then
+        echo "    Waiting ${RETRY_DELAY}s before retry..."
+        sleep "$RETRY_DELAY"
+      fi
+    done
+
+    echo "    ✗ Gave up on $NAME ($APPID) after $RETRY_ATTEMPTS attempts."
+    exit 1  # subshell exit code propagates as the function's return code
+  )
+  # The ( ) subshell's exit code becomes the function's exit code automatically
 }
 
 
-# ── Fetch game list ───────────────────────────────────────────────────────────
-echo "[$(date)] Fetching owned games for SteamID $STEAM_ID..."
+# ── Main ──────────────────────────────────────────────────────────────────────
+# Everything from here runs in a subshell so exec only affects this scope.
+(
+  log_to "$MAIN_LOG_PATH"
 
-API_URL="https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
+  echo "[$(date)] Fetching owned games for SteamID $STEAM_ID..."
 
-HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" "${API_URL}?key=${STEAM_API_KEY}&steamid=${STEAM_ID}&include_appinfo=1&include_played_free_games=1&format=json")
-HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
-HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+  API_URL="https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
 
-if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "ERROR: Steam API returned HTTP $HTTP_CODE."
-  echo "Response body: $HTTP_BODY"
-  exit 1
-fi
+  HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+    "${API_URL}?key=${STEAM_API_KEY}&steamid=${STEAM_ID}&include_appinfo=1&include_played_free_games=1&format=json")
+  HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+  HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
 
-GAME_LIST=$(echo "$HTTP_BODY" | jq -r '.response.games[] | "\(.appid) \(.name)"')
+  if [[ "$HTTP_CODE" != "200" ]]; then
+    echo "ERROR: Steam API returned HTTP $HTTP_CODE."
+    echo "Response body: $HTTP_BODY"
+    exit 1
+  fi
 
-if [[ -z "$GAME_LIST" ]]; then
-  echo "ERROR: No games returned. Check your Steam profile is public and API key/SteamID are correct."
-  echo "Raw response: $HTTP_BODY"
-  exit 1
-fi
+  GAME_LIST=$(echo "$HTTP_BODY" | jq -r '.response.games[] | "\(.appid) \(.name)"')
 
+  if [[ -z "$GAME_LIST" ]]; then
+    echo "ERROR: No games returned. Check your Steam profile is public and API key/SteamID are correct."
+    echo "Raw response: $HTTP_BODY"
+    exit 1
+  fi
 
-TOTAL=$(echo "$GAME_LIST" | wc -l)
-echo "[$(date)] Found $TOTAL games."
+  TOTAL=$(echo "$GAME_LIST" | wc -l)
+  echo "[$(date)] Found $TOTAL games."
 
-SKIPPED=()
-FAILED=()
-COUNT=0
+  SKIPPED=()
+  FAILED=()
+  COUNT=0
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-while IFS= read -r line; do
-  APPID=$(echo "$line" | awk '{print $1}')
-  NAME=$(echo "$line" | cut -d' ' -f2-)
-  COUNT=$((COUNT + 1))
+  # ── Main loop ───────────────────────────────────────────────────────────────
+  while IFS= read -r line; do
+    APPID=$(echo "$line" | awk '{print $1}')
+    NAME=$(echo "$line" | cut -d' ' -f2-)
+    COUNT=$((COUNT + 1))
 
+    echo ""
+    echo "[$COUNT/$TOTAL] $NAME ($APPID)"
+
+    if echo "$SKIP_APPIDS" | grep -qw "$APPID"; then
+      echo "  [SKIP] In skip list."
+      SKIPPED+=("$APPID: $NAME")
+      continue
+    fi
+
+    if check_installed "$APPID"; then
+      echo "  [SKIP] Already installed — skipping."
+      continue
+    fi
+
+    # download_app runs in a subshell (function call forks), so its exec
+    # redirect doesn't affect the main loop's stdout/stderr.
+    if ! download_app "$APPID" "$NAME"; then
+      FAILED+=("$APPID: $NAME")
+    fi
+
+  done <<< "$GAME_LIST"
+
+  # ── Summary ─────────────────────────────────────────────────────────────────
   echo ""
-  echo "[$COUNT/$TOTAL] $NAME ($APPID)"
+  echo "[$(date)] All done."
+  echo "  Total   : $TOTAL"
+  echo "  Skipped : ${#SKIPPED[@]}"
+  echo "  Failed  : ${#FAILED[@]}"
 
-  if echo "$SKIP_APPIDS" | grep -qw "$APPID"; then
-    echo "  [SKIP] In skip list."
-    SKIPPED+=("$APPID: $NAME")
-    continue
+  if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+    echo "Skipped:"; for s in "${SKIPPED[@]}"; do echo "    - $s"; done
   fi
-
-  if check_installed "$APPID"; then
-    echo "  [SKIP] Already installed — skipping."
-    continue
+  if [[ ${#FAILED[@]} -gt 0 ]]; then
+    echo "Failed:"; for f in "${FAILED[@]}"; do echo "    - $f"; done
   fi
-
-  if ! download_app "$APPID" "$NAME"; then
-    FAILED+=("$APPID: $NAME")
-  fi
-
-done <<< "$GAME_LIST"
-
-# ── Summary ───────────────────────────────────────────────────────────────────
-echo ""
-echo "[$(date)] All done."
-echo "  Total   : $TOTAL"
-echo "  Skipped : ${#SKIPPED[@]}"
-echo "  Failed  : ${#FAILED[@]}"
-
-if [[ ${#SKIPPED[@]} -gt 0 ]]; then
-  echo "Skipped:"; for s in "${SKIPPED[@]}"; do echo "    - $s"; done
-fi
-if [[ ${#FAILED[@]} -gt 0 ]]; then
-  echo "Failed:"; for f in "${FAILED[@]}"; do echo "    - $f"; done
-fi
+)
 
