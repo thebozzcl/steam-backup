@@ -5,7 +5,6 @@ services:
     build: .
     image: steam-updater:latest
     container_name: steam-updater
-    restart: "no"
 
     env_file:
       - .env
@@ -16,5 +15,6 @@ services:
       - ${COMPOSE_PATH}/update_library.sh:/scripts/update_library.sh:ro
       - ${COMPOSE_PATH}/logs:/scripts/logs:rw
 
-    entrypoint: ["/bin/bash", "/scripts/update_library.sh"]
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c", "while true; do FORCE_UPDATE=1 /bin/bash /scripts/update_library.sh; sleep 86400; done"]
 

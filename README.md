@@ -79,11 +79,8 @@ docker compose up -d
 
 For other UIs, like Portainer or your NAS' container manager, you're on your own.
 
-### 4 - Running it on a schedule
+The script will run immediately, finish downloading your library, then sleep for a day before doing another pass.
 
-TBD. I'm still running it for the first time (my game library is VERY big), I haven't had the
-need to set up a schedule yet.
-
-### 5 - Using these backups in Steam
+### 4 - Using these backups in Steam
 
 TBD as well. I'm using this more for archival purposes.

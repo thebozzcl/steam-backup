@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # update_library.sh
+#
+# Env options:
+#   FORCE_UPDATE=1   Run steamcmd for installed games too (updates them)
+#   STEAM_VALIDATE=1 Add "validate" (full file check, slow)
 
 set -euo pipefail
 
@@ -7,10 +11,14 @@ STEAM_API_KEY="${STEAM_API_KEY:?Set STEAM_API_KEY}"
 STEAM_ID="${STEAM_ID:?Set STEAM_ID}"
 STEAM_USER="${STEAM_USER:?Set STEAM_USER}"
 
+WAIT_SECONDS="${WAIT_SECONDS:-30}"
+
 LIBRARY_BASE="/library"
 SKIP_APPIDS="${SKIP_APPIDS:-}"
 RETRY_ATTEMPTS="${STEAM_RETRY_ATTEMPTS:-3}"
 RETRY_DELAY="${STEAM_RETRY_DELAY:-30}"
+FORCE_UPDATE="${FORCE_UPDATE:-0}"
+STEAM_VALIDATE="${STEAM_VALIDATE:-0}"
 
 LOGS_PATH=/scripts/logs
 MAIN_LOG_PATH="${LOGS_PATH}/main.log"
@@ -20,29 +28,28 @@ rm -f "${LOGS_PATH}"/*.log
 
 mkdir -p "${LIBRARY_BASE}"
 
-# ── Logging helpers ───────────────────────────────────────────────────────────
-# Redirect this process's stdout+stderr to a log file.
-# Call inside a subshell to scope the redirect.
 log_to() {
   exec >> "$1" 2>&1
 }
 
-# ── Check if an app is already installed ──────────────────────────────────────
+# ── Installed = manifest exists AND StateFlags is 4 (fully installed) ─────────
 check_installed() {
   local APPID="$1"
-  find "${LIBRARY_BASE}/${APPID}" -name "appmanifest_${APPID}.acf" 2>/dev/null | grep -q .
+  local ACF="${LIBRARY_BASE}/${APPID}/steamapps/appmanifest_${APPID}.acf"
+  grep -qs '"StateFlags"[[:space:]]*"4"' "$ACF"
 }
 
-# ── Download a single app with retries ───────────────────────────────────────
+# ── Download or update a single app with retries ──────────────────────────────
 download_app() {
   local APPID="$1"
   local NAME="$2"
   local APP_LOG_PATH="${LOGS_PATH}/${APPID}.log"
   local INSTALL_DIR="${LIBRARY_BASE}/${APPID}"
+  local VALIDATE=""
+  if [[ "$STEAM_VALIDATE" == "1" ]]; then VALIDATE="validate"; fi
 
   mkdir -p "$INSTALL_DIR"
 
-  # Subshell scopes the exec redirect — does NOT bleed back to the caller
   (
     log_to "$APP_LOG_PATH"
 
@@ -51,18 +58,20 @@ download_app() {
       ATTEMPT=$((ATTEMPT + 1))
       echo "    [Attempt $ATTEMPT/$RETRY_ATTEMPTS] $NAME ($APPID)..."
 
+      # force_install_dir MUST come before login.
+      # </dev/null stops steamcmd from reading the main loop's input.
       steamcmd \
         +@sSteamCmdForcePlatformType windows \
         +@ShutdownOnFailedCommand 0 \
         +set_download_throttle "${STEAM_DOWNLOAD_THROTTLE:-0}" \
-        +login "${STEAM_USER}" \
         +force_install_dir "$INSTALL_DIR" \
-        +app_update "$APPID" \
-        +quit
+        +login "${STEAM_USER}" \
+        +app_update "$APPID" $VALIDATE \
+        +quit </dev/null || true
 
       if check_installed "$APPID"; then
         echo "    ✓ Installed: $NAME ($APPID)"
-        exit 0  # exit the subshell, not the script
+        exit 0
       fi
 
       echo "    ✗ Not verified after attempt $ATTEMPT."
@@ -73,14 +82,11 @@ download_app() {
     done
 
     echo "    ✗ Gave up on $NAME ($APPID) after $RETRY_ATTEMPTS attempts."
-    exit 1  # subshell exit code propagates as the function's return code
+    exit 1
   )
-  # The ( ) subshell's exit code becomes the function's exit code automatically
 }
 
-
 # ── Main ──────────────────────────────────────────────────────────────────────
-# Everything from here runs in a subshell so exec only affects this scope.
 (
   log_to "$MAIN_LOG_PATH"
 
@@ -99,7 +105,7 @@ download_app() {
     exit 1
   fi
 
-  GAME_LIST=$(echo "$HTTP_BODY" | jq -r '.response.games[] | "\(.appid) \(.name)"')
+  GAME_LIST=$(echo "$HTTP_BODY" | jq -r '.response.games[]? | "\(.appid) \(.name)"')
 
   if [[ -z "$GAME_LIST" ]]; then
     echo "ERROR: No games returned. Check your Steam profile is public and API key/SteamID are correct."
@@ -108,13 +114,12 @@ download_app() {
   fi
 
   TOTAL=$(echo "$GAME_LIST" | wc -l)
-  echo "[$(date)] Found $TOTAL games."
+  echo "[$(date)] Found $TOTAL games. FORCE_UPDATE=$FORCE_UPDATE"
 
   SKIPPED=()
   FAILED=()
   COUNT=0
 
-  # ── Main loop ───────────────────────────────────────────────────────────────
   while IFS= read -r line; do
     APPID=$(echo "$line" | awk '{print $1}')
     NAME=$(echo "$line" | cut -d' ' -f2-)
@@ -129,20 +134,19 @@ download_app() {
       continue
     fi
 
-    if check_installed "$APPID"; then
+    if [[ "$FORCE_UPDATE" != "1" ]] && check_installed "$APPID"; then
       echo "  [SKIP] Already installed — skipping."
       continue
     fi
 
-    # download_app runs in a subshell (function call forks), so its exec
-    # redirect doesn't affect the main loop's stdout/stderr.
     if ! download_app "$APPID" "$NAME"; then
       FAILED+=("$APPID: $NAME")
     fi
 
+    sleep $WAIT_SECONDS
+
   done <<< "$GAME_LIST"
 
-  # ── Summary ─────────────────────────────────────────────────────────────────
   echo ""
   echo "[$(date)] All done."
   echo "  Total   : $TOTAL"
